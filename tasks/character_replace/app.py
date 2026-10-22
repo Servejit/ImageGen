@@ -115,24 +115,31 @@ def make_spec():
         "generation_backend": backend,
     }
 
-def make_prompt():
+def make_prompt(spec):
+    # The same generated JSON shown/downloaded in the UI is passed into this
+    # function and drives the model instructions; it is not merely decorative.
+    preservation = spec.get("preservation", {})
     parts = [
         "The input image is a two-panel visual guide. The LEFT panel is the original scene to edit. "
         "The RIGHT panel is the character identity reference. Return only the edited LEFT scene, "
         "not a collage or split-panel image. Replace only the main character in the left scene "
         "with the person/character shown on the right. Preserve the scene's composition and all "
         "unrelated details as faithfully as possible.",
-        instructions,
+        str(spec.get("instructions", "")),
     ]
-    if preserve_background:
+    if preservation.get("background"):
         parts.append("Keep the original left-panel background unchanged as closely as possible.")
-    if preserve_pose:
+    if preservation.get("pose_and_position"):
         parts.append("Keep the original character's pose, position, framing and body orientation.")
-    if preserve_lighting:
+    if preservation.get("lighting_and_shadows"):
         parts.append("Match the original lighting, shadows, perspective and color balance.")
-    if preserve_clothing:
+    if preservation.get("original_clothing_where_possible"):
         parts.append("Keep the original character's clothing where compatible with the reference.")
-    return " ".join(parts)
+    parts.append(
+        "Follow this JSON edit specification as the source of truth: "
+        + json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
+    )
+    return " ".join(part for part in parts if part)
 
 def build_reference_canvas(scene, reference):
     # A single image-to-image request accepts one image. Place the scene and reference
@@ -179,7 +186,7 @@ if original_file and reference_file:
     can_generate = bool(hf_token) if backend == "Hugging Face model" else bool(server_url)
     if can_generate and st.button("✨ Replace character", type="primary", use_container_width=True):
         try:
-            prompt = make_prompt()
+            prompt = make_prompt(spec)
             if backend == "Hugging Face model":
                 from huggingface_hub import InferenceClient
                 with st.spinner("Submitting images to the model. This may take several minutes…"):
@@ -207,7 +214,9 @@ if original_file and reference_file:
 
                 payload = {
                     "prompt": prompt,
+                    "specification": spec,
                     "images": [encode_upload(original_file), encode_upload(reference_file)],
+                    "image_roles": ["original_scene", "character_reference"],
                 }
                 response = requests.post(f"{server_url}/api/jobs", json=payload, timeout=120)
                 response.raise_for_status()
