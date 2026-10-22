@@ -26,7 +26,7 @@ The app packages the original scene and reference into one side-by-side visual g
 
 Choose **Compatible image server** and enter a reachable server URL. The adapter expects:
 - `GET /health` returning JSON with `status: ready` or `status: loading`
-- `POST /api/jobs` accepting JSON with `prompt` and `images` (two base64-encoded images), returning an `id`
+- `POST /api/jobs` accepting JSON with `prompt`, `specification` (the generated JSON object), `image_roles` (`original_scene`, `character_reference`), and `images` (two base64-encoded images in that order), returning an `id`
 - `GET /api/jobs/{id}` returning `status` and, on completion, `result.images[0].url`
 
 This is an adapter contract, not a universal API. A server with different endpoints needs a matching adapter.
