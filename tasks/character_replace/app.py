@@ -6,7 +6,7 @@ import time
 
 import requests
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image
 
 st.set_page_config(page_title="Character Replace AI", page_icon="🎭", layout="wide")
 
@@ -19,8 +19,8 @@ div[data-testid="stMetric"] { background: rgba(128,128,128,.08); padding: 14px; 
 
 st.title("🎭 Character Replace AI")
 st.write(
-    "Upload an original scene and a character reference. Create a JSON specification "
-    "and generate an edited image using a configured image-editing model."
+    "Upload an original scene and a character reference. Create a downloadable JSON "
+    "specification, then edit with a local Qwen model or a compatible image server."
 )
 
 def get_secret(name, default=""):
@@ -33,20 +33,19 @@ with st.sidebar:
     st.header("Generation settings")
     backend = st.radio(
         "Image generation method",
-        ["Hugging Face model", "Compatible image server"],
-        help="Hugging Face uses an image-editing model through Inference Providers. Provider use may cost money; check your account credits and billing first.",
+        ["Local Qwen model", "Compatible image server"],
+        help="Local Qwen runs the model in this Python process. It does not use Hugging Face Inference Providers or an access token. Public model weights are downloaded on first run.",
     )
-    hf_token = ""
     server_url = ""
-    if backend == "Hugging Face model":
-        hf_token = st.text_input(
-            "Hugging Face access token",
-            value=get_secret("HF_TOKEN"),
-            type="password",
-            help="Create a token with Inference Providers permission at huggingface.co/settings/tokens. Prefer adding HF_TOKEN under Streamlit App Settings > Secrets.",
-        ).strip()
-        model_id = st.text_input("Image-editing model", value="Qwen/Qwen-Image-Edit").strip()
-        provider = st.selectbox("Inference provider", ["fal-ai", "auto"], index=0)
+    if backend == "Local Qwen model":
+        model_id = st.selectbox(
+            "Local Qwen model",
+            ["Qwen/Qwen-Image-Edit-2509", "Qwen/Qwen-Image-Edit"],
+            index=0,
+            help="The 2509 model supports multiple input images. The older model is single-image input.",
+        )
+        steps = st.slider("Inference steps", min_value=10, max_value=50, value=30, step=5)
+        st.caption("First run downloads several tens of GB of model files and may take a long time.")
     else:
         server_url = st.text_input(
             "Compatible image-editing server URL",
@@ -64,6 +63,7 @@ left, right = st.columns(2, gap="large")
 with left:
     st.subheader("1. Original scene")
     original_file = st.file_uploader("Upload original image", type=["png", "jpg", "jpeg", "webp"], key="original")
+    original_image = None
     if original_file:
         original_image = Image.open(original_file).convert("RGB")
         st.image(original_image, use_container_width=True)
@@ -72,6 +72,7 @@ with left:
 with right:
     st.subheader("2. Replacement character")
     reference_file = st.file_uploader("Upload character reference", type=["png", "jpg", "jpeg", "webp"], key="reference")
+    reference_image = None
     if reference_file:
         reference_image = Image.open(reference_file).convert("RGB")
         st.image(reference_image, use_container_width=True)
@@ -83,7 +84,8 @@ instructions = st.text_area(
     value=(
         "Replace the main character in the original scene with the character shown in the "
         "reference image. Keep the original background, camera angle, composition, and "
-        "unrelated objects unchanged. Blend the replacement naturally into the scene."
+        "unrelated objects unchanged. Match the original character's pose and position where "
+        "possible. Blend the replacement naturally into the scene."
     ),
     height=120,
 )
@@ -91,7 +93,7 @@ instructions = st.text_area(
 def make_spec():
     return {
         "task": "character_replacement",
-        "version": "1.1",
+        "version": "1.2",
         "inputs": {
             "original_image": original_file.name,
             "reference_character_image": reference_file.name,
@@ -113,22 +115,21 @@ def make_spec():
         "instructions": instructions,
         "output": {"format": output_format.lower(), "keep_original_dimensions": True},
         "generation_backend": backend,
+        "model": model_id if backend == "Local Qwen model" else "compatible-image-server",
     }
 
 def make_prompt(spec):
-    # The same generated JSON shown/downloaded in the UI is passed into this
-    # function and drives the model instructions; it is not merely decorative.
     preservation = spec.get("preservation", {})
     parts = [
-        "The input image is a two-panel visual guide. The LEFT panel is the original scene to edit. "
-        "The RIGHT panel is the character identity reference. Return only the edited LEFT scene, "
-        "not a collage or split-panel image. Replace only the main character in the left scene "
-        "with the person/character shown on the right. Preserve the scene's composition and all "
-        "unrelated details as faithfully as possible.",
+        "Use the first input image as the original scene and the second input image as the "
+        "character identity/reference image. Edit the first image: replace only its main "
+        "character with the character from the second image. Do not make a collage or split "
+        "panel. Preserve the original scene, framing, camera angle, pose and unrelated details "
+        "as faithfully as possible.",
         str(spec.get("instructions", "")),
     ]
     if preservation.get("background"):
-        parts.append("Keep the original left-panel background unchanged as closely as possible.")
+        parts.append("Keep the original scene background unchanged as closely as possible.")
     if preservation.get("pose_and_position"):
         parts.append("Keep the original character's pose, position, framing and body orientation.")
     if preservation.get("lighting_and_shadows"):
@@ -141,66 +142,112 @@ def make_prompt(spec):
     )
     return " ".join(part for part in parts if part)
 
-def build_reference_canvas(scene, reference):
-    # A single image-to-image request accepts one image. Place the scene and reference
-    # side-by-side so the model receives both visually; this is a best-effort workaround.
-    target_h = min(1024, max(512, scene.height))
-    target_w = max(1, int(scene.width * target_h / scene.height))
-    target_w = min(target_w, 1024)
-    scene_panel = ImageOps.fit(scene, (target_w, target_h), method=Image.Resampling.LANCZOS)
-    ref_panel = ImageOps.contain(reference, (max(256, target_w // 2), target_h), method=Image.Resampling.LANCZOS)
-    canvas = Image.new("RGB", (target_w + ref_panel.width, target_h), "white")
-    canvas.paste(scene_panel, (0, 0))
-    canvas.paste(ref_panel, (target_w, (target_h - ref_panel.height) // 2))
-    return canvas, target_w, target_h
+@st.cache_resource(show_spinner=False)
+def load_local_qwen(model_name, device_name):
+    import torch
+    from diffusers import QwenImageEditPlusPipeline, QwenImageEditPipeline
 
-def extract_scene_panel(generated, scene_width, scene_height):
-    # Many image-editing models return a single square image regardless of input size.
-    # If the output retains the two-panel wide layout, keep its left scene panel.
-    if generated.width / max(1, generated.height) > 1.35:
-        crop_width = int(generated.height * (scene_width / scene_height))
-        crop_width = max(1, min(crop_width, generated.width))
-        generated = generated.crop((0, 0, crop_width, generated.height))
-    return generated.resize((scene_width, scene_height), Image.Resampling.LANCZOS)
+    if device_name == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    elif device_name == "mps":
+        dtype = torch.float16
+    else:
+        raise RuntimeError("Local Qwen needs a supported GPU. CUDA or Apple Silicon MPS was not detected.")
+
+    if model_name == "Qwen/Qwen-Image-Edit-2509":
+        pipe = QwenImageEditPlusPipeline.from_pretrained(model_name, torch_dtype=dtype)
+    else:
+        pipe = QwenImageEditPipeline.from_pretrained(model_name, torch_dtype=dtype)
+
+    if device_name == "cuda":
+        # Offload model components to system RAM when they are not actively running.
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to(device_name)
+    pipe.set_progress_bar_config(disable=True)
+    return pipe
+
+def detect_local_device():
+    import torch
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 if original_file and reference_file:
     spec = make_spec()
     spec_text = json.dumps(spec, indent=2, ensure_ascii=False)
     st.subheader("4. JSON edit specification")
     st.code(spec_text, language="json")
-    st.download_button("⬇️ Download JSON", data=spec_text, file_name="character_replacement.json", mime="application/json", use_container_width=True)
+    st.download_button(
+        "⬇️ Download JSON",
+        data=spec_text,
+        file_name="character_replacement.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
     st.divider()
     st.subheader("5. Generate replacement image")
-    if backend == "Hugging Face model":
-        if not hf_token:
-            st.info("Add an HF_TOKEN secret or enter a Hugging Face token in the sidebar to enable generation.")
-        st.caption(
-            "This mode sends a combined scene/reference image to an image-editing model. "
-            "Two-image character replacement is best-effort: the model may alter background details "
-            "or fail to preserve identity exactly. Hugging Face Inference Providers may require paid credits."
+    if backend == "Local Qwen model":
+        st.info(
+            "Local mode uses the Qwen Diffusers pipeline directly. It does not call Hugging Face "
+            "Inference Providers and does not need an HF token. It downloads public model weights "
+            "on first use, so internet access and substantial disk/RAM/GPU resources are required."
         )
     elif not server_url:
         st.info("Enter a reachable compatible image-server URL in the sidebar to enable this backend.")
 
-    can_generate = bool(hf_token) if backend == "Hugging Face model" else bool(server_url)
+    can_generate = True if backend == "Local Qwen model" else bool(server_url)
     if can_generate and st.button("✨ Replace character", type="primary", use_container_width=True):
         try:
             prompt = make_prompt(spec)
-            if backend == "Hugging Face model":
-                from huggingface_hub import InferenceClient
-                with st.spinner("Submitting images to the model. This may take several minutes…"):
-                    canvas, scene_panel_width, scene_panel_height = build_reference_canvas(
-                        original_image, reference_image
+            if backend == "Local Qwen model":
+                import torch
+
+                device_name = detect_local_device()
+                if device_name == "cpu":
+                    raise RuntimeError(
+                        "No supported GPU was detected. Qwen-Image-Edit is a very large model and "
+                        "CPU-only generation is not enabled because it may need enormous RAM and run "
+                        "extremely slowly. Run this app on a GPU machine (NVIDIA CUDA recommended, "
+                        "or Apple Silicon MPS where supported). Streamlit Community Cloud and a "
+                        "standard Codespace usually do not provide a suitable GPU."
                     )
-                    client = InferenceClient(provider=provider, api_key=hf_token, timeout=600)
-                    result = client.image_to_image(
-                        canvas,
-                        prompt=prompt,
-                        model=model_id or "Qwen/Qwen-Image-Edit",
-                    )
-                    result_image = extract_scene_panel(
-                        result.convert("RGB"), original_image.width, original_image.height
+                with st.spinner(
+                    "Loading local Qwen model if needed, then generating. First run downloads the model and may take a long time…"
+                ):
+                    pipe = load_local_qwen(model_id, device_name)
+                    if model_id == "Qwen/Qwen-Image-Edit-2509":
+                        model_inputs = [original_image, reference_image]
+                    else:
+                        st.warning(
+                            "The selected older Qwen model accepts one image. A side-by-side guide "
+                            "is used for this model; the 2509 model is recommended for two-image input."
+                        )
+                        from PIL import ImageOps
+                        target_size = (1024, 1024)
+                        scene_panel = ImageOps.contain(original_image, (700, 1024), method=Image.Resampling.LANCZOS)
+                        ref_panel = ImageOps.contain(reference_image, (320, 1024), method=Image.Resampling.LANCZOS)
+                        canvas = Image.new("RGB", (scene_panel.width + ref_panel.width, max(scene_panel.height, ref_panel.height)), "white")
+                        canvas.paste(scene_panel, (0, (canvas.height - scene_panel.height) // 2))
+                        canvas.paste(ref_panel, (scene_panel.width, (canvas.height - ref_panel.height) // 2))
+                        model_inputs = canvas
+
+                    call_args = {
+                        "image": model_inputs,
+                        "prompt": prompt,
+                        "num_inference_steps": steps,
+                    }
+                    if model_id == "Qwen/Qwen-Image-Edit-2509":
+                        call_args["true_cfg_scale"] = 4.0
+                        call_args["negative_prompt"] = " "
+                    with torch.inference_mode():
+                        result_image = pipe(**call_args).images[0].convert("RGB")
+                    result_image = result_image.resize(
+                        (original_image.width, original_image.height),
+                        Image.Resampling.LANCZOS,
                     )
             else:
                 health = requests.get(f"{server_url}/health", timeout=15)
