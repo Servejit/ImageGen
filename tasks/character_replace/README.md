@@ -1,23 +1,41 @@
 # Character Replace AI
 
-A Streamlit task for preparing a JSON specification to replace the main character in an original image using a second reference image.
+A Streamlit app that accepts an original scene and a character reference, creates a downloadable JSON edit specification, and can submit the edit to an image-editing model.
 
-## Run in GitHub Codespaces
+## Deploy on Streamlit Community Cloud
 
-```bash
-pip install -r tasks/character_replace/requirements.txt
-streamlit run tasks/character_replace/app.py --server.address 0.0.0.0
-```
+Select repository `Servejit/ImageGen`, branch `main`, and entrypoint `app.py`. The root `requirements.txt` includes the required packages.
 
-## Important: image generation backend
+## Built-in Hugging Face model option
 
-The app can create and download the JSON edit specification without a model server. Actual AI image replacement requires a compatible image-editing server. Set `IMAGEGEN_SERVER_URL` or enter its URL in the sidebar.
+1. Create a Hugging Face account at https://huggingface.co/.
+2. Create a user access token at https://huggingface.co/settings/tokens with **Inference Providers** permission.
+3. In Streamlit Community Cloud, open **App settings → Secrets** and add:
 
-The optional adapter currently expects:
+   ```toml
+   HF_TOKEN = "hf_your_token_here"
+   ```
+
+4. Reboot the Streamlit app. In the sidebar, choose **Hugging Face model**, choose a provider, then upload both images and click **Replace character**.
+
+The default model is `Qwen/Qwen-Image-Edit` and the default provider is `fal-ai`. Inference Providers can require paid credits; check the current account pricing and available balance before generating. Do not paste a secret token into a public GitHub file.
+
+The app packages the original scene and reference into one side-by-side visual guide because the selected image-to-image API accepts one input image. This is a best-effort approach: a model may not faithfully preserve the exact background, pose, or identity. Inspect the result before use.
+
+## Compatible image-server option
+
+Choose **Compatible image server** and enter a reachable server URL. The adapter expects:
 - `GET /health` returning JSON with `status: ready` or `status: loading`
 - `POST /api/jobs` accepting JSON with `prompt` and `images` (two base64-encoded images), returning an `id`
 - `GET /api/jobs/{id}` returning `status` and, on completion, `result.images[0].url`
 
-These are an adapter contract, not a universal API. A server with different endpoints needs a matching adapter.
+This is an adapter contract, not a universal API. A server with different endpoints needs a matching adapter.
+
+## Run locally / in Codespaces
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py --server.address 0.0.0.0
+```
 
 Background preservation is a model instruction, not a guarantee of pixel-identical background.
